@@ -14,6 +14,17 @@
  * @package Piwik
  * @subpackage Piwik_API
  */
+ 
+class Piwik_API_MultiResponse
+{
+  public $data;
+  
+  public function __construct($data)
+  {
+    $this->data = $data;
+  }
+}
+ 
 class Piwik_API_ResponseBuilder
 {
 	private $request = null;
@@ -104,7 +115,67 @@ class Piwik_API_ResponseBuilder
 		// bool // integer // float // serialized object 
 		return $this->handleScalar($value);
 	}
-
+  
+	/**
+	 * This method processes the data resulting from the "multi" API call.
+	 *
+	 * The data is expected to be an array of data elements, each accepted by the getResponse method.
+	 *
+	 * @param array        $values     An array of values, each accepted by the getResponse method.
+	 */
+	public function getMultiResponse($values)
+	{
+	  // handle specific output formats
+	  switch ( $this->outputFormat )
+	  {
+	   // handling XML format:
+	   // * construct xml response for each value in $values.
+     // * remove the xml header from all, place in beginning of final response.
+     // * append <results> to final response.
+     // * append xml responses for each value in $values, without xml header.
+     // * append </results> to final response.  
+	   case "xml":
+  	  $res = "";
+  	  foreach ( $values as $value )
+  	  {
+  	   if ( is_a($value,"Piwik_API_MultiResponse") )
+  	     $xml = $value->data;
+  	   else
+  	     $xml = $this->getResponse($value);
+  	   $lines = explode("\n",$xml,2);
+  	   $header = $lines[0];
+  	   $data = $lines[1];
+  	   if ( $res == "" )
+  	   {
+  	     $res = $header . "\n<results>\n";
+       }
+  	    $res .= $data . "\n";
+  	  }
+  	  $res .= "</results>";	   
+	   break;
+	   // handling JSON format:
+	   // * construct final response, start with "[" string
+	   // * append json response for each value in $values, add "," before second response and on.
+	   // * append "]" string to final response.
+	   case "json":
+  	  $res = "[";
+  	  foreach ( $values as $value )
+  	  {
+  	   if ( is_a($value,"Piwik_API_MultiResponse") )
+  	     $json = $value->data;
+    	 else
+    	   $json = $this->getResponse($value);
+  	   $res .= ( $res != "[" ? "," : "" ) . $json . "\n";
+  	  }
+  	  $res .= "]";	   
+	   break;
+	   default:
+			 return $this->getResponseException(new Exception('The API cannot handle output format "' . $this->output . '"with multi api mode.'));	   
+	   break;
+    }    
+	  return $res;
+  }  
+  
 	/**
 	 * Returns an error $message in the requested $format
 	 *

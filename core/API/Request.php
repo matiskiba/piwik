@@ -107,30 +107,77 @@ class Piwik_API_Request
 		// read the format requested for the output data
 		$outputFormat = strtolower(Piwik_Common::getRequestVar('format', 'xml', 'string', $this->request));
 		
+		// is multiapi enabled? if multiapi=true appears in the request.
+		$multiapi = isset($this->request["multiapi"]) && ($this->request["multiapi"]=="true");
+		
+		// if multiapi, deduce how many requests exist: the maximum length of any array found in the request 
+		if ( $multiapi )
+		{
+		  $apiCallCount = 1;
+		  foreach ($this->request as $key=>$value)
+		    if ( is_array($value) )
+		      $apiCallCount = max($apiCallCount,count($value));
+		      
+  		$returnedValues = array();
+    }
+    else
+      $apiCallCount = 1;    
+        
 		// create the response
 		$response = new Piwik_API_ResponseBuilder($outputFormat, $this->request);
-		
-		try {
-			// read parameters
-			$moduleMethod = Piwik_Common::getRequestVar('method', null, null, $this->request);
-			
-			list($module, $method) = $this->extractModuleAndMethod($moduleMethod); 
-			
-			if(!Piwik_PluginsManager::getInstance()->isPluginActivated($module))
-			{
-				throw new Piwik_FrontController_PluginDeactivatedException($module);
-			}
-			$moduleClass = "Piwik_" . $module . "_API";
+		    
+		// last token auth: prevent the need to reload the same auth multiple times
+    $last_token_auth = null;
 
-			self::reloadAuthUsingTokenAuth($this->request);
-			
-			// call the method 
-			$returnedValue = Piwik_API_Proxy::getInstance()->call($moduleClass, $method, $this->request);
-
-			$toReturn = $response->getResponse($returnedValue, $module, $method);
-		} catch(Exception $e ) {
-			$toReturn = $response->getResponseException( $e );
-		}
+    // iterate over all requests    
+    for ( $apiCallIndex = 0 ; $apiCallIndex < $apiCallCount ; $apiCallIndex++ )
+    {
+      if ( $apiCallCount == 1 )
+        $request = &$this->request;
+      // If request includes multiple request elements (i.e. arrays): construct a
+      // new request element which is flat. As expected by the API handler.
+      // If certain array has less elements then the current request index, use its
+      // latest.              
+      else
+      {
+        $request = array();
+  		  foreach ($this->request as $key=>$value)
+  		    if ( is_array($value) )
+  		      $request[$key] = $value[min(count($value)-1,$apiCallIndex)];
+  		    else
+  		      $request[$key] = $value;
+      }
+  		try {
+  			// read parameters
+  			$moduleMethod = Piwik_Common::getRequestVar('method', null, null, $request);
+  			
+  			list($module, $method) = $this->extractModuleAndMethod($moduleMethod); 
+  			
+  			if(!Piwik_PluginsManager::getInstance()->isPluginActivated($module))
+  			{
+  				throw new Piwik_FrontController_PluginDeactivatedException($module);
+  			}
+  			$moduleClass = "Piwik_" . $module . "_API";
+  
+  			$last_token_auth = self::reloadAuthUsingTokenAuth($request,$last_token_auth);
+  			
+  			// call the method 
+  			$returnedValue = Piwik_API_Proxy::getInstance()->call($moduleClass, $method, $request);
+  			if ( $multiapi )
+          $returnedValues[] = $returnedValue;   		
+  			else
+  			 $toReturn = $response->getResponse($returnedValue, $module, $method);
+  		} catch(Exception $e ) {
+  			if ( $multiapi )
+          $returnedValues[] = new Piwik_API_MultiResponse($response->getResponseException( $e ));
+        else   		
+  			 $toReturn = $response->getResponseException( $e );
+  		}
+  	}  	
+  	
+  	if ( $multiapi )
+  		$toReturn = $response->getMultiResponse($returnedValues);
+  	
 		return $toReturn;
 	}
 
@@ -142,16 +189,20 @@ class Piwik_API_Request
 	 * @param array  $request  If null, uses the default request ($_GET)
 	 * @return void
 	 */
-	static public function reloadAuthUsingTokenAuth($request = null)
+	static public function reloadAuthUsingTokenAuth($request = null,$last_token_auth = null)
 	{
 		// if a token_auth is specified in the API request, we load the right permissions
 		$token_auth = Piwik_Common::getRequestVar('token_auth', '', 'string', $request);
+		if ( ($last_token_auth !== null) && ( $last_token_auth == $token_auth ) )
+		  return $token_auth;
+		  
 		if($token_auth)
 		{
 			Piwik_PostEvent('API.Request.authenticate', $token_auth);
 			Zend_Registry::get('access')->reloadAccess();
 			Piwik::raiseMemoryLimitIfNecessary();
 		}
+		return $token_auth;		
 	}
 
 	/**
