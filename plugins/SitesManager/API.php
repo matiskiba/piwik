@@ -4,11 +4,13 @@
  * 
  * @link http://piwik.org
  * @license http://www.gnu.org/licenses/gpl-3.0.html GPL v3 or later
- * @version $Id$
+ * @version $Id: API.php 7209 2012-10-15 15:27:09Z peterb $
  * 
  * @category Piwik_Plugins
  * @package Piwik_SitesManager
  */
+
+require_once PIWIK_INCLUDE_PATH . "/core/API/BulkAnalyzer.php";
 
 /**
  * The SitesManager API gives you full control on Websites in Piwik (create, update and delete), and many methods to retrieve websites based on various attributes. 
@@ -25,8 +27,8 @@
  * The existing values can be fetched via "getExcludedIpsGlobal" and "getExcludedQueryParametersGlobal". 
  * See also the documentation about <a href='http://piwik.org/docs/manage-websites/' target='_blank'>Managing Websites</a> in Piwik.
  * @package Piwik_SitesManager
- */
-class Piwik_SitesManager_API 
+ */ 
+class Piwik_SitesManager_API extends Piwik_API_Bulk_Analyzer  
 {
 	static private $instance = null;
 	const DEFAULT_SEARCH_KEYWORD_PARAMETERS = 'q,query,s,search,searchword,k,keyword';
@@ -43,14 +45,21 @@ class Piwik_SitesManager_API
 		return self::$instance;
 	}
 	
+	public function __construct()
+  {
+    // initialize the API bulk analyzer with:
+    // * multiple occurences of SitesManager.getSiteFromId should be handled by (,) 
+    Piwik_API_Bulk_Analyzer::__construct(
+                                        array("SitesManager.getSiteFromId"=>array("Piwik_SitesManager_API","getSiteFromId_bulk"))
+                                        );
+  } 
+	
 	const OPTION_EXCLUDED_IPS_GLOBAL = 'SitesManager_ExcludedIpsGlobal';
 	const OPTION_DEFAULT_TIMEZONE = 'SitesManager_DefaultTimezone';
 	const OPTION_DEFAULT_CURRENCY = 'SitesManager_DefaultCurrency';
 	const OPTION_EXCLUDED_QUERY_PARAMETERS_GLOBAL = 'SitesManager_ExcludedQueryParameters';
 	const OPTION_SEARCH_KEYWORD_QUERY_PARAMETERS_GLOBAL = 'SitesManager_SearchKeywordParameters';
 	const OPTION_SEARCH_CATEGORY_QUERY_PARAMETERS_GLOBAL = 'SitesManager_SearchCategoryParameters';
-	const OPTION_EXCLUDED_USER_AGENTS_GLOBAL = 'SitesManager_ExcludedUserAgentsGlobal';
-	const OPTION_SITE_SPECIFIC_USER_AGENT_EXCLUDE_ENABLE = 'SitesManager_EnableSiteSpecificUserAgentExclude';
 
 	/**
 	 * Returns the javascript tag for the given idSite.
@@ -123,6 +132,27 @@ class Piwik_SitesManager_API
 													WHERE idsite = ?", $idSite);
 		return $site;
 	}
+	
+	public function getSiteFromId_bulk( $idSite )
+	{
+		Piwik::checkUserHasViewAccess( $idSite );
+		$ret = Zend_Registry::get('db')->fetchAll("SELECT * 
+													FROM ".Piwik_Common::prefixTable("site")." 
+													WHERE idsite IN (" . implode(",",$idSite) . ")");
+													
+		return $this->mapResultsToRequestsByKey($idSite,$ret,false,"idsite");
+		$idToSite = array();
+    foreach ( $ret as $r )
+      $idToSite[$r["idsite"]] = $r;
+    $sites = array();
+    foreach ($idSite as $id)
+      if ( isset($idToSite[$id]) )
+        $sites[] = &$idToSite[$id];
+      else
+        $sites[] = false;
+		return $sites;
+	}
+	
 	
 	/**
 	 * Returns the list of alias URLs registered for the given idSite.
@@ -453,19 +483,7 @@ class Piwik_SitesManager_API
 	 * 
 	 * @return int the website ID created
 	 */
-	public function addSite( $siteName,
-							   $urls,
-							   $ecommerce = null,
-							   $siteSearch = null,
-							   $searchKeywordParameters = null,
-							   $searchCategoryParameters = null,
-							   $excludedIps = null,
-							   $excludedQueryParameters = null,
-							   $timezone = null,
-							   $currency = null,
-							   $group = null,
-							   $startDate = null,
-							   $excludedUserAgents = null )
+	public function addSite( $siteName, $urls, $ecommerce = null, $siteSearch = null, $searchKeywordParameters = null, $searchCategoryParameters = null, $excludedIps = null, $excludedQueryParameters = null, $timezone = null, $currency = null, $group = null, $startDate = null )
 	{
 		Piwik::checkUserIsSuperUser();
 		
@@ -500,8 +518,7 @@ class Piwik_SitesManager_API
 		);
 	
 		$bind['excluded_ips'] = $this->checkAndReturnExcludedIps($excludedIps);
-		$bind['excluded_parameters'] = $this->checkAndReturnCommaSeparatedStringList($excludedQueryParameters);
-		$bind['excluded_user_agents'] = $this->checkAndReturnCommaSeparatedStringList($excludedUserAgents);
+		$bind['excluded_parameters'] = $this->checkAndReturnExcludedQueryParameters($excludedQueryParameters);
 		$bind['timezone'] = $timezone;
 		$bind['currency'] = $currency;
 		$bind['ecommerce'] = (int)$ecommerce;
@@ -755,69 +772,8 @@ class Piwik_SitesManager_API
 	 */
 	public function getExcludedQueryParametersGlobal()
 	{
-		Piwik::checkUserHasSomeViewAccess();
+		Piwik::checkUserHasSomeAdminAccess();
 		return Piwik_GetOption(self::OPTION_EXCLUDED_QUERY_PARAMETERS_GLOBAL);
-	}
-	
-	/**
-	 * Returns the list of user agent substrings to look for when excluding visits for
-	 * all websites. If a visitor's user agent string contains one of these substrings,
-	 * their visits will not be included.
-	 * 
-	 * @return string Comma separated list of strings.
-	 */
-	public function getExcludedUserAgentsGlobal()
-	{
-		Piwik::checkUserHasSomeAdminAccess();
-		return Piwik_GetOption(self::OPTION_EXCLUDED_USER_AGENTS_GLOBAL);
-	}
-	
-	/**
-	 * Sets list of user agent substrings to look for when excluding visits. For more info,
-	 * @see getExcludedUserAgentsGlobal.
-	 * 
-	 * @param string $excludedUserAgents Comma separated list of strings. Each element is trimmed,
-	 *                                   and empty strings are removed.
-	 */
-	public function setGlobalExcludedUserAgents( $excludedUserAgents )
-	{
-		Piwik::checkUserIsSuperUser();
-		
-		// update option
-		$excludedUserAgents = $this->checkAndReturnCommaSeparatedStringList($excludedUserAgents);
-		Piwik_SetOption(self::OPTION_EXCLUDED_USER_AGENTS_GLOBAL, $excludedUserAgents);
-		
-		// make sure tracker cache will reflect change
-		Piwik_Common::deleteTrackerCache();
-	}
-	
-	/**
-	 * Returns true if site-specific user agent exclusion has been enabled. If it hasn't,
-	 * only the global user agent substrings (see @setGlobalExcludedUserAgents) will be used.
-	 * 
-	 * @return bool
-	 */
-	public function isSiteSpecificUserAgentExcludeEnabled()
-	{
-		Piwik::checkUserHasSomeAdminAccess();
-		return (bool)Piwik_GetOption(self::OPTION_SITE_SPECIFIC_USER_AGENT_EXCLUDE_ENABLE);
-	}
-	
-	/**
-	 * Sets whether it should be allowed to exclude different user agents for different
-	 * websites.
-	 * 
-	 * @param bool $enabled
-	 */
-	public function setSiteSpecificUserAgentExcludeEnabled( $enabled )
-	{
-		Piwik::checkUserIsSuperUser();
-		
-		// update option
-		Piwik_SetOption(self::OPTION_SITE_SPECIFIC_USER_AGENT_EXCLUDE_ENABLE, $enabled);
-		
-		// make sure tracker cache will reflect change
-		Piwik_Common::deleteTrackerCache();
 	}
 	
 	/**
@@ -830,7 +786,7 @@ class Piwik_SitesManager_API
 	public function setGlobalExcludedQueryParameters($excludedQueryParameters)
 	{
 		Piwik::checkUserIsSuperUser();
-		$excludedQueryParameters = $this->checkAndReturnCommaSeparatedStringList($excludedQueryParameters);
+		$excludedQueryParameters = $this->checkAndReturnExcludedQueryParameters($excludedQueryParameters);
 		Piwik_SetOption(self::OPTION_EXCLUDED_QUERY_PARAMETERS_GLOBAL, $excludedQueryParameters);
 		Piwik_Common::deleteTrackerCache();
 		return true;
@@ -941,8 +897,7 @@ class Piwik_SitesManager_API
 	                            $timezone = null,
 	                            $currency = null,
 	                            $group = null,
-	                            $startDate = null,
-	                            $excludedUserAgents = null)
+	                            $startDate = null)
 	{
 		Piwik::checkUserHasAdminAccess($idSite);
 
@@ -991,8 +946,7 @@ class Piwik_SitesManager_API
 			$bind['ts_created'] = Piwik_Date::factory($startDate)->getDatetime();
 		}
 		$bind['excluded_ips'] = $this->checkAndReturnExcludedIps($excludedIps);
-		$bind['excluded_parameters'] = $this->checkAndReturnCommaSeparatedStringList($excludedQueryParameters);
-		$bind['excluded_user_agents'] = $this->checkAndReturnCommaSeparatedStringList($excludedUserAgents);
+		$bind['excluded_parameters'] = $this->checkAndReturnExcludedQueryParameters($excludedQueryParameters);
 
 		$bind['sitesearch'] = $this->checkSiteSearch($siteSearch);
 		list($searchKeywordParameters, $searchCategoryParameters ) = $this->checkSiteSearchParameters($searchKeywordParameters, $searchCategoryParameters);
@@ -1017,7 +971,7 @@ class Piwik_SitesManager_API
 		Piwik_PostEvent('SitesManager.updateSite', $idSite);
 	}
 	
-	private function checkAndReturnCommaSeparatedStringList($parameters)
+	private function checkAndReturnExcludedQueryParameters($parameters)
 	{
 		$parameters = trim($parameters);
 		if(empty($parameters))

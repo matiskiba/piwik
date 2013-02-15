@@ -4,7 +4,7 @@
  * 
  * @link http://piwik.org
  * @license http://www.gnu.org/licenses/gpl-3.0.html GPL v3 or later
- * @version $Id$
+ * @version $Id: Proxy.php 6885 2012-08-29 21:50:07Z capedfuzz $
  * 
  * @category Piwik
  * @package Piwik
@@ -142,6 +142,28 @@ class Piwik_API_Proxy
 	{
 		return count($this->alreadyRegistered);
 	}
+	
+	/**
+	 * Will execute $className->analyzeBulkAPIFromRequests($requests)
+	 * If not such method exists, it will return an empty array.	 
+	 * 
+	 * @param string  $className          The class name (eg. Piwik_Referers_API)
+	 * @param array   $requests           The requests collection
+	 *
+	 * @return array
+	 */
+	public function analyzeBulkAPIFromRequests($className, $requests)
+	{
+		$this->registerClass($className);
+
+		// instanciate the object
+		$object = call_user_func(array($className, "getInstance"));
+			
+		if ( $this->isMethodAvailable($className,"analyzeBulkAPIFromRequests") )
+  		return call_user_func_array(array($object, "analyzeBulkAPIFromRequests"), array(&$requests));
+    else
+      return array();			
+  }
 
 	/**
 	 * Will execute $className->$methodName($parametersValues)
@@ -154,19 +176,26 @@ class Piwik_API_Proxy
 	 * @param string  $className          The class name (eg. Piwik_Referers_API)
 	 * @param string  $methodName         The method name
 	 * @param array   $parametersRequest  The parameters pairs (name=>value)
+	 * @param bool    $bulk               Should the call be made in "bulk" mode.
+	 *                                    In this mode the $parametersRequest is
+	 *                                    an array of arrays.
 	 *
 	 * @return mixed|null
 	 * @throws Exception|Piwik_Access_NoAccessException
 	 */
-	public function call($className, $methodName, $parametersRequest )
+	public function call($className, $methodName, $parametersRequest, $bulk=false )
 	{
-		$returnedValue = null;
+		$returnedValue = null;		
 		
 		// Temporarily sets the Request array to this API call context
 		$saveGET = $_GET;
-		foreach($parametersRequest as $param => $value) {
-			$_GET[$param] = $value;
-		}
+		if ( !$bulk )
+		{
+		  // TODO: what to do for bulk processing?
+		  foreach($parametersRequest as $param => $value) {
+  			$_GET[$param] = $value;
+  		}
+  	}
 		
 		try {
 			$this->registerClass($className);
@@ -181,8 +210,11 @@ class Piwik_API_Proxy
 			$parameterNamesDefaultValues = $this->getParametersList($className, $methodName);
 
 			// load parameters in the right order, etc.
-			$finalParameters = $this->getRequestParametersArray( $parameterNamesDefaultValues, $parametersRequest );
-
+			if ( $bulk )
+       $finalParameters = $this->getBulkRequestParametersArray( $parameterNamesDefaultValues, $parametersRequest ); 			
+      else
+			 $finalParameters = $this->getRequestParametersArray( $parameterNamesDefaultValues, $parametersRequest );
+			
 			// start the timer
 			$timer = new Piwik_Timer();
 			
@@ -265,8 +297,53 @@ class Piwik_API_Proxy
 		// make sure metadata gets reloaded
 		$this->alreadyRegistered = array();
 		$this->metadataArray = array();
-	}
+	}		
 
+	/**
+	 * TODO: ....	
+	 */
+	private function getBulkRequestParametersArray( $requiredParameters, $parametersRequests )
+	{
+		$finalParameters = array();
+		foreach($requiredParameters as $name => $defaultValue)
+			$finalParameters[] = array();
+    $index = 0;			
+		foreach($requiredParameters as $name => $defaultValue)
+		{
+		  foreach ( $parametersRequests as $parametersRequest )
+		  {
+  			try{
+  				if($defaultValue instanceof Piwik_API_Proxy_NoDefaultValue)
+  				{
+  					$requestValue = Piwik_Common::getRequestVar($name, null, null, $parametersRequest);
+  				}
+  				else
+  				{
+  					try{
+  						$requestValue = Piwik_Common::getRequestVar($name, $defaultValue, null, $parametersRequest);
+  					} catch(Exception $e) {
+  						// Special case: empty parameter in the URL, should return the empty string
+  						if(isset($parametersRequest[$name]) 
+  							&& $parametersRequest[$name] === '')
+  						{
+  							$requestValue = '';
+  						}
+  						else
+  						{
+  							$requestValue = $defaultValue;
+  						}
+  					}
+  				}
+  			} catch(Exception $e) {
+  				throw new Exception(Piwik_TranslateException('General_PleaseSpecifyValue', array($name)));
+  			}
+  			$finalParameters[$index][] = $requestValue;
+  		}
+			$index++;
+		}
+		return $finalParameters;
+	}
+	
 	/**
 	 * Returns an array containing the values of the parameters to pass to the method to call
 	 *
